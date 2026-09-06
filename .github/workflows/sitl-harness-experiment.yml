@@ -1,0 +1,66 @@
+# Experiment only. Runs the existing SITL harness on a stock GitHub runner to
+# measure runtime and per-scenario stability. Not intended for upstream as-is.
+name: SITL harness experiment
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiment/sitl-in-ci]
+
+jobs:
+  sitl:
+    name: SITL harness (ubuntu-latest, x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Init config submodule
+        run: git submodule update --init -- src/config
+
+      - name: Runner facts
+        run: |
+          echo "arch: $(uname -m)"
+          echo "kernel: $(uname -r)"
+          echo "cpus: $(nproc)"
+          python3 --version
+
+      - name: Build SITL (A)
+        run: |
+          make TARGET=SITL
+          cp obj/main/betaflight_SITL.elf /tmp/A.elf
+
+      - name: Build SITL (B, rescue plan)
+        run: |
+          make TARGET=SITL EXTRA_FLAGS=-DENABLE_RESCUE_PLAN=1
+          cp obj/main/betaflight_SITL.elf /tmp/B.elf
+
+      - name: Run the full scenario suite
+        run: |
+          start=$(date +%s)
+          python3 src/test/sitl/sitl_harness.py \
+            --binary /tmp/A.elf --binary-b /tmp/B.elf \
+            --scenario all 2>&1 | tee /tmp/harness.log || true
+          end=$(date +%s)
+          echo "WALL_CLOCK_SECONDS=$((end-start))" | tee -a /tmp/harness.log
+
+      - name: Summary
+        run: |
+          {
+            echo "## SITL harness on ubuntu-latest"
+            echo ""
+            echo '```'
+            grep -E '^\[harness\] (PASS|FAIL)' /tmp/harness.log || echo "no summary lines found"
+            grep -E '^WALL_CLOCK_SECONDS' /tmp/harness.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "--- passed/failed counts ---"
+          echo "PASS: $(grep -cE '^\[harness\] PASS' /tmp/harness.log || true)"
+          echo "FAIL: $(grep -cE '^\[harness\] FAIL' /tmp/harness.log || true)"
+
+      - name: Upload full log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sitl-harness-log
+          path: /tmp/harness.log
